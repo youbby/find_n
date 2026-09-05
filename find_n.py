@@ -112,7 +112,9 @@ def triangle_metrics(x, y, N):
     A=(x[n],y[n]), B=(x[n-N],y[n-N]), C=(x[n+N],y[n+N])
 
     |AB|, |AC|, |BC|      : 각 변의 유클리드 거리
-    R  = |AB| / |AC|      : 변 비율
+    R  = |AB-AC| / (AB+AC) : 대칭 차이 (0에 가까울수록 A가 B,C로부터 대칭적 위치).
+                            기존 |AB|/|AC| 비율 형태는 0~∞로 비대칭이고 분모가
+                            작을 때 불안정해서, 대칭이고 [0,1]로 유계인 이 형태로 대체.
     S  = 0.5*|AB x AC|    : 외적 기반 삼각형 넓이
     H  = 2*S / |BC|       : BC를 밑변으로 하는 높이
     theta                 : A에서의 내각, arccos(AB·AC / (|AB||AC|))
@@ -143,7 +145,7 @@ def triangle_metrics(x, y, N):
     cross = ABx * ACy - ABy * ACx
     S = 0.5 * np.abs(cross)
     H = np.where(BC > 0, 2 * S / BC, np.nan)
-    R = np.where(AC > 0, AB / AC, np.nan)
+    R = np.where((AB + AC) > 0, np.abs(AB - AC) / (AB + AC), np.nan)
 
     dot = ABx * ACx + ABy * ACy
     denom = AB * AC
@@ -174,9 +176,9 @@ def _metrics_curve(x, y, candidate_Ns, stat_fn=np.nanmedian):
 
 
 def _pick_best_N(val, candidate_Ns):
-    """전역 최적값 기준 지표별 채택 N (H/S/kappa=최솟값, R=1에 최근접)."""
+    """전역 최적값 기준 지표별 채택 N (H/S/kappa/R 모두 최솟값 = 0에 최근접)."""
     return {
-        "R": min(candidate_Ns, key=lambda N: abs(val["R"][N] - 1.0)),
+        "R": min(candidate_Ns, key=lambda N: val["R"][N]),
         "S": min(candidate_Ns, key=lambda N: val["S"][N]),
         "H": min(candidate_Ns, key=lambda N: val["H"][N]),
         "kappa": min(candidate_Ns, key=lambda N: val["kappa"][N]),
@@ -384,8 +386,8 @@ def _run_target_detection_sweep(title, use_outliers=False, n_outliers=50, outlie
     inject_outliers()로 이상치를 주입한 뒤 x를 다시 cumsum한다.
 
     후보 N=1~16 전체에 대해 R/S/H/κ의 회차별 median을 구하고, 10회 평균
-    (mean-of-median)으로 대표 곡선을 만든 뒤 각 지표가 전역 최적값(H/S/κ는
-    최솟값, R은 |R-1| 최솟값) 기준으로 어떤 N을 채택하는지 확인한다.
+    (mean-of-median)으로 대표 곡선을 만든 뒤 각 지표가 전역 최적값(H/S/κ/R 모두
+    최솟값 = 0에 최근접) 기준으로 어떤 N을 채택하는지 확인한다.
 
     정답 판정은 관대(lenient) 기준을 사용한다: 채택된 N이 target N의 배수
     (found_N % target_N == 0)이면 정답으로 인정한다 (6.3절 참고).
@@ -434,7 +436,7 @@ def _run_target_detection_sweep(title, use_outliers=False, n_outliers=50, outlie
         agg = {m: {N: np.mean(trial_medians[m][N]) for N in candidate_Ns} for m in metrics_list}
 
         best_N = {
-            "R": min(candidate_Ns, key=lambda N: abs(agg["R"][N] - 1.0)),
+            "R": min(candidate_Ns, key=lambda N: agg["R"][N]),
             "S": min(candidate_Ns, key=lambda N: agg["S"][N]),
             "H": min(candidate_Ns, key=lambda N: agg["H"][N]),
             "kappa": min(candidate_Ns, key=lambda N: agg["kappa"][N]),
@@ -558,7 +560,7 @@ def _run_hitrate_sweep(title, use_outliers=False, n_outliers=50, outlier_range=(
                 val["kappa"][N] = np.nanmedian(tm["kappa"])
 
             best_N = {
-                "R": min(candidate_Ns, key=lambda N: abs(val["R"][N] - 1.0)),
+                "R": min(candidate_Ns, key=lambda N: val["R"][N]),
                 "S": min(candidate_Ns, key=lambda N: val["S"][N]),
                 "H": min(candidate_Ns, key=lambda N: val["H"][N]),
                 "kappa": min(candidate_Ns, key=lambda N: val["kappa"][N]),
