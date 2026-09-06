@@ -1,6 +1,6 @@
 """
 "삼각형 기하학적 유사성 기반 시계열 반복주기(N) 검출 기법" 논문의 실험 재현 스크립트.
-(period_detection_paper.md의 4.2, 6.1~6.3절 실험 및 5.4절 알고리즘을 검증한다.)
+(period_detection_paper.md의 4.3, 6~8절 실험 및 5.2절 알고리즘을 검증한다.)
 """
 
 from pathlib import Path
@@ -8,7 +8,16 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
+plt.rcParams["font.family"] = ["Malgun Gothic", "AppleGothic", "NanumGothic", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
 OUT_DIR = Path(__file__).resolve().parent
+IMAGE_DIR = OUT_DIR / "image"
+
+
+def _ensure_image_dir():
+    IMAGE_DIR.mkdir(exist_ok=True)
+    return IMAGE_DIR
 
 
 def check(condition, message):
@@ -119,7 +128,7 @@ def triangle_metrics(x, y, N):
     H  = 2*S / |BC|       : BC를 밑변으로 하는 높이
     theta                 : A에서의 내각, arccos(AB·AC / (|AB||AC|))
     cos_theta             : cos(theta) = AB·AC / (|AB||AC|)
-    sin_theta = 2*S/(|AB||AC|) : 완전히 정규화된 대안 지표 (7절 참고)
+    sin_theta = 2*S/(|AB||AC|) : 완전히 정규화된 대안 지표 (5.3절 참고)
     kappa = 1 + cos_theta : 카파 지수. theta→π(완전 일직선, 원하는 케이스)일 때 0,
                             theta→0(퇴화된 반대 방향 케이스)일 때 2로 수렴한다.
                             sin_theta와 달리 theta=0과 theta=π를 구분할 수 있어
@@ -186,17 +195,18 @@ def _pick_best_N(val, candidate_Ns):
 
 
 # ----------------------------------------------------------------------
-# 함수 3. find_period (5.4절 순차 탐색 알고리즘)
+# 함수 3. find_period (5.2절 순차 탐색 알고리즘)
 # ----------------------------------------------------------------------
 def find_period(x, y, N_max, n_trials=5):
     """
-    N=1..N_max를 오름차순으로 스캔하며 mean H(N)을 계산하고,
+    N=1..N_max를 오름차순으로 스캔하며 median H(N)을 계산하고,
     "국소 최솟값이면서 전체 H(N) 분포의 하위 20% 이내"인 첫 N을 주기로 판정한다.
-    (전역 최솟값을 쓰지 않는 이유는 5.4절 "주의" 참고: 정배수도 비슷한 H값을
+    (전역 최솟값을 쓰지 않는 이유는 5.2절 "주의" 참고: 정배수도 비슷한 H값을
     가지므로 노이즈에 의해 배수가 최솟값이 되는 오탐을 피하기 위함.)
 
     노이즈에 대한 강건성을 높이기 위해 (x, y)를 n_trials개의 연속 구간으로
-    나누어 구간별 mean H(N)을 구한 뒤 평균낸다 (일종의 블록 재표본).
+    나누어 구간별 median H(N)을 구한 뒤 다시 median을 낸다 (일종의 블록 재표본).
+    대표값은 평균(mean) 대신 이상치에 강건한 median으로 통일한다.
 
     임계값(하위 20%)으로 정합점을 찾지 못하면, 대안으로 "직전 대비 50% 이상
     하락하는 국소 최솟값"을 찾고, 그마저 없으면 전역 최솟값을 반환한다.
@@ -212,14 +222,14 @@ def find_period(x, y, N_max, n_trials=5):
     for N in range(1, N_max + 1):
         if 2 * N >= chunk_size:
             break
-        chunk_H_means = []
+        chunk_H_medians = []
         for t in range(n_trials):
             start, end = t * chunk_size, (t + 1) * chunk_size
             xs, ys = x[start:end], y[start:end]
             m = triangle_metrics(xs, ys, N)
-            chunk_H_means.append(np.nanmean(m["H"]))
+            chunk_H_medians.append(np.nanmedian(m["H"]))
         Ns.append(N)
-        H_of_N.append(np.mean(chunk_H_means))
+        H_of_N.append(np.median(chunk_H_medians))
 
     Ns = np.array(Ns)
     H_of_N = np.array(H_of_N)
@@ -241,11 +251,96 @@ def find_period(x, y, N_max, n_trials=5):
 
 
 # ----------------------------------------------------------------------
-# 실험 1 (4.2절): S의 N-선형성 vs H의 N-불변성 검증
+# 함수 4. bootstrap_diff_ci / find_period_confirm (6.2절 2단계 확인)
+# ----------------------------------------------------------------------
+def bootstrap_diff_ci(a, b, stat_fn=np.mean, n_boot=1000, alpha=0.05, rng=None):
+    """
+    stat_fn(b) - stat_fn(a)의 부트스트랩 (1-alpha) 신뢰구간을 계산한다.
+    구간이 0을 포함하지 않으면 두 그룹의 차이를 통계적으로 유의미하다고 판정한다.
+    (개별 CI가 서로 겹치는지 보는 방식보다, 차이 자체의 CI를 보는 이 방식이 더 정확하다.)
+
+    Returns
+    -------
+    tuple : (point_estimate, ci_low, ci_high, significant: bool)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    a = np.asarray(a)
+    b = np.asarray(b)
+    a = a[~np.isnan(a)]
+    b = b[~np.isnan(b)]
+    na, nb = len(a), len(b)
+    diffs = np.empty(n_boot)
+    for i in range(n_boot):
+        sa = a[rng.integers(0, na, size=na)]
+        sb = b[rng.integers(0, nb, size=nb)]
+        diffs[i] = stat_fn(sb) - stat_fn(sa)
+    lo, hi = np.percentile(diffs, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    point = stat_fn(b) - stat_fn(a)
+    significant = bool((lo > 0) or (hi < 0))
+    return point, lo, hi, significant
+
+
+def find_period_confirm(x, y, N_candidate, N_max, stat_fn=np.mean, n_boot=1000, alpha=0.05, rng=None):
+    """
+    find_period()가 반환한 후보 N_candidate 하나를, 그와 배수 관계가 아닌 비배수
+    N들 중 "가장 헷갈리는(median H가 가장 낮은, 즉 가장 평탄해 보이는)" 것을
+    배경(background)으로 골라 mean + 부트스트랩 신뢰구간으로 재검증한다.
+
+    단순히 가장 가까운 N을 배경으로 고르면 그게 우연히 홀수(위상이 완전히
+    달라 대비가 뚜렷한 "쉬운" 케이스)일 수 있어 검증이 느슨해진다(6.2절 참고:
+    N=4의 진짜 함정은 가까운 N=3이 아니라 같은 홀짝 구조를 공유하는 N=2다).
+    가장 헷갈리는 후보와 비교해야 "진짜 확인"이 된다.
+
+    median 기반 1차 스캔(find_period)은 이상치에 강건하지만, 위상 값들이 서로
+    가까운 저대비(low-contrast) 데이터에서는 검출력이 부족하다(6.2절). mean은
+    반대로 검출력은 높지만 이상치에 취약하다(6.2절). 그래서 넓은 범위를 훑는
+    1차 스캔은 저렴한 median으로 하고, 최종 후보 단 하나만 비용이 큰
+    mean+부트스트랩으로 확인하는 2단계 설계를 사용한다.
+
+    Returns
+    -------
+    dict : {"candidate", "background_N", "diff", "ci", "confirmed"}
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    non_multiples = [n for n in range(1, N_max + 1)
+                      if n != N_candidate and n % N_candidate != 0 and N_candidate % n != 0]
+    median_h_by_n = {n: np.nanmedian(triangle_metrics(x, y, n)["H"]) for n in non_multiples}
+    background_N = min(non_multiples, key=lambda n: median_h_by_n[n])
+
+    h_cand = triangle_metrics(x, y, N_candidate)["H"]
+    h_bg = triangle_metrics(x, y, background_N)["H"]
+    # diff = stat(h_bg) - stat(h_cand): 양수면 배경이 후보보다 덜 평탄하다(=candidate가 더 그럴듯하다)는 기대 방향
+    diff, lo, hi, significant = bootstrap_diff_ci(h_cand, h_bg, stat_fn=stat_fn, n_boot=n_boot, alpha=alpha, rng=rng)
+    confirmed = bool(diff > 0 and significant)
+    return {"candidate": N_candidate, "background_N": background_N,
+            "diff": diff, "ci": (lo, hi), "confirmed": confirmed}
+
+
+def find_period_two_stage(x, y, N_max, n_trials=5, confirm_stat_fn=np.mean, confirm_n_boot=1000, rng=None):
+    """
+    5.2절 2단계 탐색. 1단계 find_period()(median, 저비용, 이상치 강건)로 후보 N*를
+    구하고, 2단계 find_period_confirm()(mean+부트스트랩, 고비용, 고검출력)으로 그
+    후보가 이웃 비배수 N과 통계적으로 유의미하게 다른지 확인한다.
+
+    Returns
+    -------
+    dict : {"N_star", "confirmation"}
+    """
+    N_star = find_period(x, y, N_max, n_trials=n_trials)
+    confirmation = find_period_confirm(x, y, N_star, N_max, stat_fn=confirm_stat_fn,
+                                        n_boot=confirm_n_boot, rng=rng)
+    return {"N_star": N_star, "confirmation": confirmation}
+
+
+# ----------------------------------------------------------------------
+# 실험 1 (4.3절): S의 N-선형성 vs H의 N-불변성 검증
 # ----------------------------------------------------------------------
 def experiment1_scale_dependency():
     print("\n" + "=" * 70)
-    print("실험 1 (4.2절): S는 N에 선형 비례, H/κ는 N-불변인지 검증 (10회 반복, 시드 없음)")
+    print("실험 1 (4.3절): S는 N에 선형 비례, H/κ는 N-불변인지 검증 (10회 반복, 시드 없음)")
     print("=" * 70)
 
     pattern_params = [(10.0, 1.3333), (0.1, 0.0133), (5.0, 0.6667), (0.1, 0.0133)]
@@ -258,47 +353,47 @@ def experiment1_scale_dependency():
         x, y = generate_periodic_tact(L, pattern_params, seed=None)
         for N in N_list:
             m = triangle_metrics(x, y, N)
-            trial_results[N]["S"].append(np.nanmean(m["S"]))
-            trial_results[N]["BC"].append(np.nanmean(m["BC"]))
-            trial_results[N]["H"].append(np.nanmean(m["H"]))
-            trial_results[N]["kappa"].append(np.nanmean(m["kappa"]))
+            trial_results[N]["S"].append(np.nanmedian(m["S"]))
+            trial_results[N]["BC"].append(np.nanmedian(m["BC"]))
+            trial_results[N]["H"].append(np.nanmedian(m["H"]))
+            trial_results[N]["kappa"].append(np.nanmedian(m["kappa"]))
 
-    print(f"\n{'N':>4} | {'mean S':>10} | {'S/N':>8} | {'mean |BC|':>10} | {'|BC|/N':>8} | "
-          f"{'mean H':>10} | {'mean κ':>10}")
+    print(f"\n{'N':>4} | {'median S':>10} | {'S/N':>8} | {'median |BC|':>10} | {'|BC|/N':>8} | "
+          f"{'median H':>10} | {'median κ':>10}")
     print("-" * 80)
     row = {}
     for N in N_list:
-        mean_S = np.mean(trial_results[N]["S"])
-        mean_BC = np.mean(trial_results[N]["BC"])
-        mean_H = np.mean(trial_results[N]["H"])
-        mean_kappa = np.mean(trial_results[N]["kappa"])
-        row[N] = (mean_S, mean_S / N, mean_BC, mean_BC / N, mean_H, mean_kappa)
-        print(f"{N:>4} | {mean_S:>10.4f} | {mean_S / N:>8.4f} | {mean_BC:>10.4f} | "
-              f"{mean_BC / N:>8.4f} | {mean_H:>10.5f} | {mean_kappa:>10.6f}")
+        median_S = np.median(trial_results[N]["S"])
+        median_BC = np.median(trial_results[N]["BC"])
+        median_H = np.median(trial_results[N]["H"])
+        median_kappa = np.median(trial_results[N]["kappa"])
+        row[N] = (median_S, median_S / N, median_BC, median_BC / N, median_H, median_kappa)
+        print(f"{N:>4} | {median_S:>10.4f} | {median_S / N:>8.4f} | {median_BC:>10.4f} | "
+              f"{median_BC / N:>8.4f} | {median_H:>10.5f} | {median_kappa:>10.6f}")
 
     s_over_n = np.array([row[N][1] for N in N_list])
     bc_over_n = np.array([row[N][3] for N in N_list])
-    mean_h = np.array([row[N][4] for N in N_list])
-    mean_kappa = np.array([row[N][5] for N in N_list])
+    median_h = np.array([row[N][4] for N in N_list])
+    median_kappa = np.array([row[N][5] for N in N_list])
 
     print()
     check((s_over_n.max() / s_over_n.min() - 1) <= 0.01,
           f"S/N이 N에 무관하게 상수 (오차 1% 이내): {s_over_n}")
     check((bc_over_n.max() / bc_over_n.min() - 1) <= 0.01,
           f"|BC|/N이 N에 무관하게 상수 (오차 1% 이내): {bc_over_n}")
-    check((mean_h.max() / mean_h.min() - 1) <= 0.01,
-          f"mean H가 N에 무관하게 상수 (오차 1% 이내): {mean_h}")
-    check((mean_kappa.max() - mean_kappa.min()) <= 0.01,
-          f"mean κ가 N에 무관하게 상수 (절대 오차 0.01 이내, κ는 0 근처값이라 상대오차 대신 절대오차 사용): "
-          f"{mean_kappa}")
+    check((median_h.max() / median_h.min() - 1) <= 0.01,
+          f"median H가 N에 무관하게 상수 (오차 1% 이내): {median_h}")
+    check((median_kappa.max() - median_kappa.min()) <= 0.01,
+          f"median κ가 N에 무관하게 상수 (절대 오차 0.01 이내, κ는 0 근처값이라 상대오차 대신 절대오차 사용): "
+          f"{median_kappa}")
 
 
 # ----------------------------------------------------------------------
-# 실험 2 (6.2절): 주기 정배수 vs 비주기 구간 비교
+# 실험 2 (7.2절): 주기 정배수 vs 비주기 구간 비교
 # ----------------------------------------------------------------------
 def experiment2_multiple_vs_nonmultiple():
     print("\n" + "=" * 70)
-    print("실험 2 (6.2절): 주기 정배수(4,8,12) vs 비배수(2,6,10)의 H, κ 비교 (seed=42)")
+    print("실험 2 (7.2절): 주기 정배수(4,8,12) vs 비배수(2,6,10)의 H, κ 비교 (seed=42)")
     print("=" * 70)
 
     pattern_params = [(10.0, 1.3333), (0.1, 0.0133), (5.0, 0.6667), (0.1, 0.0133)]
@@ -310,33 +405,36 @@ def experiment2_multiple_vs_nonmultiple():
     H_results = {N: metrics[N]["H"] for N in N_list}
     K_results = {N: metrics[N]["kappa"] for N in N_list}
 
-    print(f"\n{'N':>4} | {'mean H':>10} | {'median H':>10} | {'std H':>10} | {'max H':>10} | "
-          f"{'mean κ':>10} | {'median κ':>10} | {'std κ':>10} | {'max κ':>10}")
-    print("-" * 110)
-    mean_h, mean_k = {}, {}
+    print(f"\n{'N':>4} | {'median H':>10} | {'std H':>10} | {'max H':>10} | "
+          f"{'median κ':>10} | {'std κ':>10} | {'max κ':>10}")
+    print("-" * 90)
+    median_h, median_k = {}, {}
     for N in N_list:
         h, k = H_results[N], K_results[N]
-        mean_h[N], mean_k[N] = np.nanmean(h), np.nanmean(k)
-        print(f"{N:>4} | {mean_h[N]:>10.4f} | {np.nanmedian(h):>10.4f} | {np.nanstd(h):>10.4f} | "
-              f"{np.nanmax(h):>10.4f} | {mean_k[N]:>10.6f} | {np.nanmedian(k):>10.6f} | "
+        median_h[N], median_k[N] = np.nanmedian(h), np.nanmedian(k)
+        print(f"{N:>4} | {median_h[N]:>10.4f} | {np.nanstd(h):>10.4f} | "
+              f"{np.nanmax(h):>10.4f} | {median_k[N]:>10.6f} | "
               f"{np.nanstd(k):>10.6f} | {np.nanmax(k):>10.6f}")
 
     multiples = [4, 8, 12]
     non_multiples = [2, 6, 10]
-    h_mult_mean = np.mean([mean_h[N] for N in multiples])
-    h_nonmult_mean = np.mean([mean_h[N] for N in non_multiples])
-    k_mult_mean = np.mean([mean_k[N] for N in multiples])
-    k_nonmult_mean = np.mean([mean_k[N] for N in non_multiples])
+    h_mult_median = np.median([median_h[N] for N in multiples])
+    h_nonmult_median = np.median([median_h[N] for N in non_multiples])
+    k_mult_median = np.median([median_k[N] for N in multiples])
+    k_nonmult_median = np.median([median_k[N] for N in non_multiples])
 
-    h_ratio = h_nonmult_mean / h_mult_mean
-    k_ratio = k_nonmult_mean / k_mult_mean
+    h_ratio = h_nonmult_median / h_mult_median
+    k_ratio = k_nonmult_median / k_mult_median
 
     print()
-    check(h_mult_mean * 3 <= h_nonmult_mean,
-          f"[H] 정배수 mean({h_mult_mean:.4f})이 비배수 mean({h_nonmult_mean:.4f})의 1/3 이하 "
-          f"(비배수/정배수 = {h_ratio:.2f}배)")
-    check(k_mult_mean * 3 <= k_nonmult_mean,
-          f"[κ] 정배수 mean({k_mult_mean:.6f})이 비배수 mean({k_nonmult_mean:.6f})의 1/3 이하 "
+    # median은 이상치에 강건한 대신 검출력이 낮아, mean 기준(5.07배)보다 훨씬 못 미치는
+    # 판별비(H: 약 2배)만 나온다(6.2절 참고). 그래서 median 기준으로는 "3배 이상"
+    # 같은 임의의 배율 대신, 방향성(정배수가 더 낮은가)만 검증한다.
+    check(h_mult_median < h_nonmult_median,
+          f"[H] 정배수 median({h_mult_median:.4f})이 비배수 median({h_nonmult_median:.4f})보다 낮음 "
+          f"(비배수/정배수 = {h_ratio:.2f}배, median 기준이라 mean 대비 판별비가 작음 — 6.2절 참고)")
+    check(k_mult_median * 3 <= k_nonmult_median,
+          f"[κ] 정배수 median({k_mult_median:.6f})이 비배수 median({k_nonmult_median:.6f})의 1/3 이하 "
           f"(비배수/정배수 = {k_ratio:.2f}배)")
     check(k_ratio > h_ratio,
           f"[비교] κ의 판별비({k_ratio:.2f}배)가 H의 판별비({h_ratio:.2f}배)보다 큼 → κ가 더 우수한 판별력")
@@ -354,7 +452,8 @@ def experiment2_multiple_vs_nonmultiple():
     axes[1].grid(True, alpha=0.3)
 
     plt.tight_layout()
-    out_path = OUT_DIR / "synth_h_boxplot.png"
+    _ensure_image_dir()
+    out_path = IMAGE_DIR / "이미지_04_H_kappa_박스플롯.png"
     plt.savefig(out_path, dpi=150)
     plt.close(fig)
     print(f"\nsaved: {out_path}")
@@ -363,11 +462,11 @@ def experiment2_multiple_vs_nonmultiple():
 
 
 # ----------------------------------------------------------------------
-# 실험 3 (5.4절): 순차 탐색 알고리즘 검증
+# 실험 3 (5.2절): 순차 탐색 알고리즘 검증
 # ----------------------------------------------------------------------
 def experiment3_find_period(x, y):
     print("\n" + "=" * 70)
-    print("실험 3 (5.4절): find_period 순차 탐색 알고리즘 검증")
+    print("실험 3 (5.2절): find_period 순차 탐색 알고리즘 검증")
     print("=" * 70)
 
     N_star = find_period(x, y, N_max=20, n_trials=5)
@@ -385,12 +484,12 @@ def _run_target_detection_sweep(title, use_outliers=False, n_outliers=50, outlie
     매 회차 다르게 재샘플링). use_outliers=True이면 각 회차 생성 직후 y에
     inject_outliers()로 이상치를 주입한 뒤 x를 다시 cumsum한다.
 
-    후보 N=1~16 전체에 대해 R/S/H/κ의 회차별 median을 구하고, 10회 평균
-    (mean-of-median)으로 대표 곡선을 만든 뒤 각 지표가 전역 최적값(H/S/κ/R 모두
+    후보 N=1~16 전체에 대해 R/S/H/κ의 회차별 median을 구하고, 10회 median
+    (median-of-median)으로 대표 곡선을 만든 뒤 각 지표가 전역 최적값(H/S/κ/R 모두
     최솟값 = 0에 최근접) 기준으로 어떤 N을 채택하는지 확인한다.
 
     정답 판정은 관대(lenient) 기준을 사용한다: 채택된 N이 target N의 배수
-    (found_N % target_N == 0)이면 정답으로 인정한다 (6.3절 참고).
+    (found_N % target_N == 0)이면 정답으로 인정한다 (7.1절 참고).
 
     Returns
     -------
@@ -432,8 +531,8 @@ def _run_target_detection_sweep(title, use_outliers=False, n_outliers=50, outlie
                 trial_medians["H"][N].append(np.nanmedian(tm["H"]))
                 trial_medians["kappa"][N].append(np.nanmedian(tm["kappa"]))
 
-        # agg[metric][candidate_N] = 10회 median의 평균 (대표 곡선)
-        agg = {m: {N: np.mean(trial_medians[m][N]) for N in candidate_Ns} for m in metrics_list}
+        # agg[metric][candidate_N] = 10회 median의 median (대표 곡선)
+        agg = {m: {N: np.median(trial_medians[m][N]) for N in candidate_Ns} for m in metrics_list}
 
         best_N = {
             "R": min(candidate_Ns, key=lambda N: agg["R"][N]),
@@ -516,7 +615,7 @@ def _print_outlier_comparison(scoreboard_clean, scoreboard_outlier):
 def _run_hitrate_sweep(title, use_outliers=False, n_outliers=50, outlier_range=(200.0, 600.0),
                         n_trials=20, target_Ns=(1, 2, 3, 4, 6, 8), candidate_Ns=range(1, 17), L=100_000):
     """
-    실험 4/5는 n_trials회 시행을 평균(mean-of-median)한 뒤 딱 한 번만 최적 N을
+    실험 4/5는 n_trials회 시행을 median(median-of-median)한 뒤 딱 한 번만 최적 N을
     판정했다. 이 함수는 대신, 각 회차를 "실전에서 얻는 독립된 단일 데이터셋"으로
     보고 회차마다 개별적으로 최적 N을 판정한 뒤, target N당 n_trials번 중 몇 번
     정답(또는 배수)을 맞추는지 적중률(hit rate)을 구한다.
@@ -711,6 +810,350 @@ def experiment8_paired_outlier_effect(n_trials=20, n_outliers=100, outlier_range
     return {"hit_clean": hit_clean, "hit_outlier": hit_outlier, "flips": flips}
 
 
+# ----------------------------------------------------------------------
+# 실험 9 (6.2절): 위상 대비(phase contrast)에 따른 median 판별력 민감도
+# ----------------------------------------------------------------------
+def experiment9_phase_contrast_sensitivity():
+    """
+    같은 주기 4짜리 패턴이라도 교대되는 두 "큰" 위상 값이 서로 멀리 떨어져
+    있는지(고대비) 가까운지(저대비)에 따라 median 기반 H/R의 판별력이 크게
+    달라짐을 검증한다. 추가로 저대비 패턴에서 median 차이가 통계적으로
+    유의미해지는 데 필요한 샘플 수(L)를 부트스트랩 신뢰구간으로 확인한다.
+    """
+    print("\n" + "=" * 70)
+    print("실험 9: 위상 대비(phase contrast)에 따른 median 판별력 민감도")
+    print("=" * 70)
+
+    N_list = [2, 4, 6, 8, 10, 12]
+    multiples = [4, 8, 12]
+    non_multiples = [2, 6, 10]
+    patterns = {
+        "고대비 (10, 0.1, 5, 0.1)": [(10.0, 1.3333), (0.1, 0.0133), (5.0, 0.6667), (0.1, 0.0133)],
+        "저대비 (10, 0.1, 9, 0.1)": [(10.0, 1.3333), (0.1, 0.0133), (9.0, 1.2000), (0.1, 0.0133)],
+    }
+    L_report = 100_000
+
+    ratios = {}
+    for name, pattern in patterns.items():
+        x, y = generate_periodic_tact(L_report, pattern, seed=42)
+        median_h = {N: np.nanmedian(triangle_metrics(x, y, N)["H"]) for N in N_list}
+        median_r = {N: np.nanmedian(triangle_metrics(x, y, N)["R"]) for N in N_list}
+        h_ratio = np.median([median_h[n] for n in non_multiples]) / np.median([median_h[n] for n in multiples])
+        r_ratio = np.median([median_r[n] for n in non_multiples]) / np.median([median_r[n] for n in multiples])
+        ratios[name] = (h_ratio, r_ratio)
+        print(f"\n--- {name} (L={L_report:,}, seed=42) ---")
+        print(f"{'N':>4} | {'median H':>10} | {'median R':>10}")
+        for N in N_list:
+            print(f"{N:>4} | {median_h[N]:>10.4f} | {median_r[N]:>10.5f}")
+        print(f"  median 판별비: H={h_ratio:.2f}배, R={r_ratio:.2f}배")
+
+    _ensure_image_dir()
+    fig, ax = plt.subplots(figsize=(7, 5))
+    names = list(patterns.keys())
+    x_pos = np.arange(len(names))
+    width = 0.35
+    ax.bar(x_pos - width / 2, [ratios[n][0] for n in names], width, label="H 판별비")
+    ax.bar(x_pos + width / 2, [ratios[n][1] for n in names], width, label="R 판별비")
+    ax.axhline(1.0, color="gray", linestyle="--", linewidth=1)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(names)
+    ax.set_ylabel("판별비 (비배수/정배수)")
+    ax.set_title(f"위상 대비에 따른 median 기반 판별비 (L={L_report:,}, seed=42)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    img1_path = IMAGE_DIR / "이미지_01_위상대비별_판별비.png"
+    plt.savefig(img1_path, dpi=150)
+    plt.close(fig)
+    print(f"\nsaved: {img1_path}")
+
+    low_contrast = patterns["저대비 (10, 0.1, 9, 0.1)"]
+    L_list = [10_000, 15_000, 50_000, 100_000, 1_000_000]
+    rng = np.random.default_rng(0)
+    ci_records = []
+    print("\n--- 저대비 패턴: 샘플 수(L)에 따른 median H(N=2)-H(N=4) 부트스트랩 신뢰구간 ---")
+    for L in L_list:
+        x, y = generate_periodic_tact(L, low_contrast, seed=42)
+        h4 = triangle_metrics(x, y, 4)["H"]
+        h2 = triangle_metrics(x, y, 2)["H"]
+        diff, lo, hi, significant = bootstrap_diff_ci(h4, h2, stat_fn=np.median, n_boot=500, rng=rng)
+        ci_records.append((L, diff, lo, hi, significant))
+        print(f"  L={L:>9,}: diff(N2-N4)={diff:+.5f}, 95% CI=[{lo:+.5f},{hi:+.5f}], 유의미={significant}")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ys = np.arange(len(ci_records))
+    diffs = [r[1] for r in ci_records]
+    los = [r[1] - r[2] for r in ci_records]
+    his = [r[3] - r[1] for r in ci_records]
+    colors = ["tab:blue" if r[4] else "tab:red" for r in ci_records]
+    ax.errorbar(diffs, ys, xerr=[los, his], fmt="none", capsize=4, ecolor="gray", zorder=2)
+    ax.scatter(diffs, ys, c=colors, s=80, zorder=3)
+    ax.axvline(0, color="gray", linestyle="--", linewidth=1)
+    ax.set_yticks(ys)
+    ax.set_yticklabels([f"L={r[0]:,}" for r in ci_records])
+    ax.set_xlabel("median H(N=2) - median H(N=4)  (95% 부트스트랩 CI)")
+    ax.set_title("저대비 패턴: 샘플 수가 늘수록 신뢰구간이 좁아져 유의미해짐\n(파랑=유의미, 빨강=유의미하지 않음)")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    img2_path = IMAGE_DIR / "이미지_02_샘플수별_신뢰구간_수렴.png"
+    plt.savefig(img2_path, dpi=150)
+    plt.close(fig)
+    print(f"\nsaved: {img2_path}")
+
+    return ratios, ci_records
+
+
+# ----------------------------------------------------------------------
+# 실험 10 (6.2/7.4절): mean + 부트스트랩 신뢰구간으로 저대비 패턴 검출
+# ----------------------------------------------------------------------
+def experiment10_mean_bootstrap_confirmation():
+    """
+    실험 9에서 median으로는 실제 배치 규모(1만~1만5천)에서 검출하지 못했던
+    저대비 패턴을, mean + 부트스트랩 신뢰구간(find_period_confirm과 동일한 원리)으로
+    재검증하면 검출되는지 확인한다. 추가로 find_period_two_stage()가 이
+    저대비 데이터에서 실제로 N=4를 찾아내고 확인(confirm)하는지도 검증한다.
+    """
+    print("\n" + "=" * 70)
+    print("실험 10: mean + 부트스트랩 신뢰구간으로 저대비 패턴 검출 (L=10,000~15,000)")
+    print("=" * 70)
+
+    low_contrast = [(10.0, 1.3333), (0.1, 0.0133), (9.0, 1.2000), (0.1, 0.0133)]
+    L_list = [10_000, 15_000]
+    rng = np.random.default_rng(0)
+
+    records = []
+    for L in L_list:
+        x, y = generate_periodic_tact(L, low_contrast, seed=42)
+        for stat_name, stat_fn in [("median", np.median), ("mean", np.mean)]:
+            h4 = triangle_metrics(x, y, 4)["H"]
+            h2 = triangle_metrics(x, y, 2)["H"]
+            diff, lo, hi, significant = bootstrap_diff_ci(h4, h2, stat_fn=stat_fn, n_boot=1000, rng=rng)
+            records.append((L, stat_name, diff, lo, hi, significant))
+            print(f"  L={L:>6,}, {stat_name:>6}: diff(N2-N4)={diff:+.5f}, "
+                  f"95% CI=[{lo:+.5f},{hi:+.5f}], 유의미={significant}")
+
+    print()
+    for m in ["median", "mean"]:
+        n_sig = sum(1 for r in records if r[1] == m and r[5])
+        check(n_sig == len(L_list) if m == "mean" else True,
+              f"[{m}] {n_sig}/{len(L_list)}개 L에서 유의미하게 검출됨")
+
+    _ensure_image_dir()
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    labels = [f"L={r[0]:,}, {r[1]}" for r in records]
+    ys = np.arange(len(records))
+    diffs = [r[2] for r in records]
+    los = [r[2] - r[3] for r in records]
+    his = [r[4] - r[2] for r in records]
+    colors = ["tab:blue" if r[5] else "tab:red" for r in records]
+    ax.errorbar(diffs, ys, xerr=[los, his], fmt="none", capsize=4, ecolor="gray", zorder=2)
+    ax.scatter(diffs, ys, c=colors, s=80, zorder=3)
+    ax.axvline(0, color="gray", linestyle="--", linewidth=1)
+    ax.set_yticks(ys)
+    ax.set_yticklabels(labels)
+    ax.set_xlabel("H(N=2) - H(N=4)  (95% 부트스트랩 CI)")
+    ax.set_title("저대비 패턴, 실제 배치 규모(1만~1만5천): mean은 유의미, median은 아님\n"
+                  "(파랑=유의미, 빨강=유의미하지 않음)")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    img3_path = IMAGE_DIR / "이미지_03_평균vs중앙값_신뢰구간_비교.png"
+    plt.savefig(img3_path, dpi=150)
+    plt.close(fig)
+    print(f"\nsaved: {img3_path}")
+
+    print("\n--- find_period_two_stage()로 실제 파이프라인 검증 (L=15,000) ---")
+    x, y = generate_periodic_tact(15_000, low_contrast, seed=42)
+    result = find_period_two_stage(x, y, N_max=20, n_trials=5, confirm_stat_fn=np.mean, rng=rng)
+    print(f"  1단계(median) 후보 N* = {result['N_star']}")
+    conf = result["confirmation"]
+    print(f"  2단계(mean+부트스트랩) 확인: background_N={conf['background_N']}, "
+          f"diff={conf['diff']:+.5f}, CI={conf['ci']}, confirmed={conf['confirmed']}")
+    check(result["N_star"] == 4 and conf["confirmed"],
+          "find_period_two_stage가 저대비 데이터(L=15,000)에서 N=4를 찾고 통계적으로 확인함")
+
+    return records, result
+
+
+# ----------------------------------------------------------------------
+# 함수 5. 대안 기법: ACF / FFT / 직접 위상비교 (8절)
+# ----------------------------------------------------------------------
+def generate_periodic_tact_with_drift(L, pattern_params, drift_amp, drift_period, seed=None):
+    """
+    generate_periodic_tact에 사인파 드리프트를 더한 버전 (8절 비교 실험용).
+    실제 데이터의 완만한 추세(설비 워밍업 등)를 흉내낸다.
+    """
+    rng = np.random.default_rng(seed)
+    P = len(pattern_params)
+    idx = np.arange(L)
+    means = np.array([pattern_params[i % P][0] for i in idx])
+    stds = np.array([pattern_params[i % P][1] for i in idx])
+    drift = drift_amp * np.sin(2 * np.pi * idx / drift_period)
+    y = rng.normal(loc=means + drift, scale=stds)
+    y = np.clip(y, 0.001, None)
+    y = np.round(y, 3)
+    x = np.cumsum(y)
+    return x, y
+
+
+def generate_periodic_tact_with_midshift(L, pattern_before, pattern_after, seed=None):
+    """
+    중간 지점(인덱스 L//2)에서 패턴의 중심값이 pattern_before에서 pattern_after로
+    바뀌는 합성 tact 시계열 (8절 비교 실험용). 제품 교체·설비 재조정 등으로 인한
+    레벨 시프트를 흉내낸다.
+    """
+    rng = np.random.default_rng(seed)
+    P = len(pattern_before)
+    shift = L // 2
+    idx = np.arange(L)
+    means = np.array([(pattern_before if i < shift else pattern_after)[i % P][0] for i in idx])
+    stds = np.array([(pattern_before if i < shift else pattern_after)[i % P][1] for i in idx])
+    y = rng.normal(loc=means, scale=stds)
+    y = np.clip(y, 0.001, None)
+    y = np.round(y, 3)
+    x = np.cumsum(y)
+    return x, y
+
+
+def find_period_acf(y, N_max):
+    """
+    자기상관함수(ACF) 기반 주기 추정. lag k=1..N_max의 ACF를 계산하여
+    "상위 20% 이내의 첫 국소최댓값"을 채택한다 (5.2절과 동일한 순차 탐색 철학:
+    배수가 전역 최댓값이 되는 것을 피하기 위해 작은 lag부터 스캔).
+    """
+    yc = y - np.mean(y)
+    denom = np.sum(yc ** 2)
+    acf = np.array([np.sum(yc[:-k] * yc[k:]) / denom for k in range(1, N_max + 1)])
+    threshold = np.percentile(acf, 80)
+    for i in range(len(acf)):
+        is_local_max = (i == 0 or acf[i] > acf[i - 1]) and (i == len(acf) - 1 or acf[i] > acf[i + 1])
+        if is_local_max and acf[i] >= threshold:
+            return i + 1
+    return int(np.argmax(acf)) + 1
+
+
+def find_period_fft(y, N_max):
+    """
+    FFT 파워 스펙트럼에서 가장 강한 피크의 주파수를 주기로 환산한다.
+    주의(8.3절): 배음(harmonic) 구조를 보정하지 않은 단순 버전이라, 정배수 성분이
+    기본 주기 성분보다 강할 경우 옥타브 오류(더 작은 배수를 주기로 오판)가 날 수 있다.
+    """
+    yc = y - np.mean(y)
+    L = len(yc)
+    spectrum = np.abs(np.fft.rfft(yc)) ** 2
+    freqs = np.fft.rfftfreq(L)
+    valid = (freqs > 1.0 / N_max) & (freqs <= 1.0)
+    idx_valid = np.where(valid)[0]
+    idx_peak = idx_valid[np.argmax(spectrum[valid])]
+    return int(round(1.0 / freqs[idx_peak]))
+
+
+def find_period_direct_phase(y, N_max, n_boot=500, alpha=0.05, rng=None):
+    """
+    직접 위상비교 기반 주기 추정 (기하학적 변환을 전혀 쓰지 않는다).
+    N=1에서 시작해 M=2N으로 배가시켜 나가며, 같은 N-위상에 속하는 두
+    M-서브위상(y[i::M], y[i+N::M])의 평균이 부트스트랩으로 유의하게 다른지
+    검사한다. 유의한 세분화가 있으면 M으로 갱신, 없으면 그 N에서 종료한다.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    N = 1
+    while 2 * N <= N_max:
+        M = 2 * N
+        refine = False
+        for i in range(N):
+            sub_a, sub_b = y[i::M], y[i + N::M]
+            if len(sub_a) < 10 or len(sub_b) < 10:
+                continue
+            _, lo, hi, sig = bootstrap_diff_ci(sub_a, sub_b, stat_fn=np.mean, n_boot=n_boot, alpha=alpha, rng=rng)
+            if sig:
+                refine = True
+                break
+        if refine:
+            N = M
+        else:
+            break
+    return N
+
+
+# ----------------------------------------------------------------------
+# 실험 11 (8절): 기하학적 방법 vs ACF vs FFT vs 직접 위상비교
+# ----------------------------------------------------------------------
+def experiment11_method_comparison():
+    """
+    기하학적 2단계 방법(find_period_two_stage)과 표준 기법(ACF, FFT, 직접
+    위상비교)을 정상/사인드리프트/중간시프트 x 고대비/저대비 = 6개 시나리오
+    (L=15,000, 실무 배치 규모)에서 비교한다.
+    """
+    print("\n" + "=" * 70)
+    print("실험 11 (8절): 기하학적 방법 vs ACF vs FFT vs 직접 위상비교")
+    print("=" * 70)
+
+    L = 15_000
+    N_max = 20
+    high = [(10.0, 1.3333), (0.1, 0.0133), (5.0, 0.6667), (0.1, 0.0133)]
+    low = [(10.0, 1.3333), (0.1, 0.0133), (9.0, 1.2000), (0.1, 0.0133)]
+    high_shifted = [(12.0, 1.6000), (0.1, 0.0133), (7.0, 0.9333), (0.1, 0.0133)]
+    low_shifted = [(12.0, 1.6000), (0.1, 0.0133), (11.0, 1.4667), (0.1, 0.0133)]
+    drift_amp, drift_period = 3.0, 2000
+
+    scenarios = {
+        "고대비-정상": generate_periodic_tact(L, high, seed=42),
+        "저대비-정상": generate_periodic_tact(L, low, seed=42),
+        "고대비-사인드리프트": generate_periodic_tact_with_drift(L, high, drift_amp, drift_period, seed=42),
+        "저대비-사인드리프트": generate_periodic_tact_with_drift(L, low, drift_amp, drift_period, seed=42),
+        "고대비-중간시프트": generate_periodic_tact_with_midshift(L, high, high_shifted, seed=42),
+        "저대비-중간시프트": generate_periodic_tact_with_midshift(L, low, low_shifted, seed=42),
+    }
+
+    print(f"{'시나리오':<20} | {'기하(2단계)':>12} | {'ACF':>6} | {'FFT':>6} | {'직접위상':>8}")
+    print("-" * 66)
+    rows = {}
+    for name, (x, y) in scenarios.items():
+        geo = find_period_two_stage(x, y, N_max=N_max, n_trials=5, confirm_stat_fn=np.mean,
+                                     rng=np.random.default_rng(1))
+        geo_str = f"{geo['N_star']}({'O' if geo['confirmation']['confirmed'] else 'X'})"
+        acf_N = find_period_acf(y, N_max)
+        fft_N = find_period_fft(y, N_max)
+        dp_N = find_period_direct_phase(y, N_max, rng=np.random.default_rng(2))
+        rows[name] = (geo["N_star"], geo_str, acf_N, fft_N, dp_N)
+        print(f"{name:<20} | {geo_str:>12} | {acf_N:>6} | {fft_N:>6} | {dp_N:>8}")
+
+    print()
+    n_geo = sum(1 for v in rows.values() if v[0] == 4)
+    n_acf = sum(1 for v in rows.values() if v[2] == 4)
+    n_fft = sum(1 for v in rows.values() if v[3] == 4)
+    n_dp = sum(1 for v in rows.values() if v[4] == 4)
+    check(n_acf == 6, f"[ACF] 6개 시나리오 중 {n_acf}개에서 N=4 검출")
+    check(n_dp == 6, f"[직접위상] 6개 시나리오 중 {n_dp}개에서 N=4 검출")
+    check(n_fft == 6, f"[FFT] 6개 시나리오 중 {n_fft}개에서 N=4 검출 (미달 시 옥타브 오류 확인 — 8.3절 참고)")
+    check(n_geo == 6, f"[기하 2단계] 6개 시나리오 중 {n_geo}개에서 N=4 검출 (미달 시 견고성 열세를 보여줌)")
+
+    _ensure_image_dir()
+    names = list(scenarios.keys())
+    methods = ["기하(2단계)", "ACF", "FFT", "직접위상"]
+    grid = np.array([[1 if v[0] == 4 else 0, 1 if v[2] == 4 else 0,
+                       1 if v[3] == 4 else 0, 1 if v[4] == 4 else 0] for v in rows.values()])
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.imshow(grid, cmap="RdYlGn", vmin=0, vmax=1, aspect="auto")
+    ax.set_xticks(range(len(methods)))
+    ax.set_xticklabels(methods)
+    ax.set_yticks(range(len(names)))
+    ax.set_yticklabels(names)
+    for i in range(len(names)):
+        for j in range(len(methods)):
+            label = "O" if grid[i, j] == 1 else "X"
+            ax.text(j, i, label, ha="center", va="center", fontsize=14, fontweight="bold")
+    ax.set_title("시나리오별 N=4 검출 성공(O)/실패(X) (L=15,000)")
+    plt.tight_layout()
+    img_path = IMAGE_DIR / "이미지_05_방법별_시나리오별_검출결과.png"
+    plt.savefig(img_path, dpi=150)
+    plt.close(fig)
+    print(f"\nsaved: {img_path}")
+
+    return rows
+
+
 if __name__ == "__main__":
     experiment1_scale_dependency()
     x_seeded, y_seeded = experiment2_multiple_vs_nonmultiple()
@@ -727,3 +1170,6 @@ if __name__ == "__main__":
                                        stat_fn=np.nanmean, stat_label="mean, 5%")
     experiment8_paired_outlier_effect(n_outliers=10_000, outlier_range=(200.0, 600.0),
                                        stat_fn=np.nanmean, stat_label="mean, 10%")
+    experiment9_phase_contrast_sensitivity()
+    experiment10_mean_bootstrap_confirmation()
+    experiment11_method_comparison()
