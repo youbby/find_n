@@ -1927,7 +1927,7 @@ L532 ========================================================================
 | v3 | `09c5fb133218a48e4015233f338d7b24c996966a` | `verification_v3.py`, `verification_v3_log.txt`(532행), 이미지 07·08 |
 | v4 | `2cbaae22986e2d76678db6ed516b8b061c432f87` | `verification_v4.py`, `verification_v4_log.txt`, 이미지 09 |
 | v4(결손 추가) | `9a4cb20f8b7cbfe1c202f9e8b8a3af2af1af63a3` | `verification_tooth.py`, `verification_tooth_log.txt`, 이미지 10 |
-| v5 | `__V5_COMMIT_HASH__` | `verification_tooth_v2.py`, `verification_tooth_v2_log.txt`, 본 문서(citation 정정 포함) |
+| v5 | `1182ba05d7cc5ab404938ca021f36f4af4cc8586` | `verification_tooth_v2.py`, `verification_tooth_v2_log.txt`, 본 문서(citation 정정 포함) |
 
 > 자기 참조의 한계: 논문 파일 자체가 저장소 안에 있으므로, 그 파일에 적힌 해시는 **논문
 > 본문을 담은 커밋이 아니라 그 논문이 인용하는 스크립트·로그를 담은 커밋**을 가리킨다.
@@ -1947,7 +1947,7 @@ python verification_v4.py       # Appendix F의 로그를 재생성 (verificatio
 git checkout 9a4cb20f8b7cbfe1c202f9e8b8a3af2af1af63a3                                          # v4 결손 실험 추가분
 python verification_tooth.py    # Appendix G의 로그를 재생성 (verification_tooth_log.txt)
 
-git checkout __V5_COMMIT_HASH__                                                # v5 판본
+git checkout 1182ba05d7cc5ab404938ca021f36f4af4cc8586                                                # v5 판본
 python verification_tooth_v2.py # Appendix H의 로그를 재생성 (verification_tooth_v2_log.txt)
 ```
 
