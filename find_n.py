@@ -307,6 +307,14 @@ def find_period_confirm(x, y, N_candidate, N_max, stat_fn=np.mean, n_boot=1000, 
 
     non_multiples = [n for n in range(1, N_max + 1)
                       if n != N_candidate and n % N_candidate != 0 and N_candidate % n != 0]
+    if not non_multiples:
+        # N_candidate=1이면 모든 N이 그 배수라 비교할 배경이 존재하지 않는다.
+        # N*=1은 "매 샘플이 곧 한 주기" = 반복 구조를 찾지 못했다는 뜻이므로,
+        # 확인할 대상 자체가 없다고 보고 미확정으로 반환한다.
+        return {"candidate": N_candidate, "background_N": None,
+                "diff": float("nan"), "ci": (float("nan"), float("nan")),
+                "confirmed": False}
+
     median_h_by_n = {n: np.nanmedian(triangle_metrics(x, y, n)["H"]) for n in non_multiples}
     background_N = min(non_multiples, key=lambda n: median_h_by_n[n])
 

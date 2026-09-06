@@ -369,20 +369,26 @@ v1의 이 절은 실측 알람 tact 데이터의 **앵커점 1~2개**에서 계�
 
 **(2) 실행**
 
-`find_n.py`와 `verification_v2.py`를 그대로 사용한다. 합성 데이터 생성 함수 대신 실측 `x, y`를 넣는 것 외에는 수정하지 않는다.
+`internal_validation.py`가 아래 (3)의 네 가지 보고 항목을 한 번에 산출한다. 지표·탐색 함수는 `find_n.py` / `verification_v2.py`의 것을 **수정 없이 그대로** 호출하며, 합성 데이터 생성 함수 대신 실측 `x, y`를 넣는 것이 유일한 차이다.
 
-```python
-# 사내 환경에서만 실행. 원자료는 저장소에 커밋하지 말 것.
-x, y = load_internal_log(path)          # y[n] = x[n] - x[n-1], 초 단위 float
-for N in range(1, 21):
-    m = triangle_metrics(x, y, N)       # find_n.py
-    report(N, count=np.sum(~np.isnan(m["H"])),
-              mean=np.nanmean(m["H"]), median=np.nanmedian(m["H"]),
-              std=np.nanstd(m["H"]))
-res = find_period_two_stage(x, y, N_max=20, n_trials=5, confirm_stat_fn=np.mean)
+```
+# 사내망에서 실행. 원자료는 저장소에 커밋하지 말 것(.gitignore에 등록되어 있음).
+python internal_validation.py --input production_log.csv
+python internal_validation.py --input log.xlsx --sheet Sheet1 --time-col 완료시각
+python internal_validation.py --input log.csv --max-tact 300    # 비생산 구간 제외
 ```
 
-**(3) 보고 항목** — 아래 4가지를 산출해 이 절에 삽입한다.
+산출물은 `out_internal/`에 생성된다 — 로그 전문(`internal_validation_log.txt`), N별 H Box plot(`H_by_N_boxplot.png`), 그리고 본 절에 그대로 붙여넣을 수 있는 초안(`section_7_3_draft.md`).
+
+필요한 것은 **시각 컬럼 하나뿐**이다. 원본에 tact 컬럼이 있어도 사용하지 않고 `y[n] = time[n] − time[n−1]`을 스크립트가 직접 재계산한다. 시각 컬럼은 컬럼명으로 자동 추정하며, 실패하면 `--time-col`로 지정한다.
+
+**실행 전 확인할 것**
+
+- `--max-tact`는 **반드시 지정한 실행과 지정하지 않은 실행을 둘 다 수행해 결과를 비교**한다. 임계값을 잘못 잡으면 정상 생산 위상까지 잘려나가 주기 구조 자체가 사라진다. 실제로 P=4 검증 데이터에서 `--max-tact 8`(10초 위상을 잘라내는 값)을 주면 N\*=1, 즉 "반복 구조 없음"으로 판정이 뒤집힌다.
+- L이 8.2절 규모(15,000)에 크게 못 미치면 스크립트가 경고를 출력한다. 이 경우 결과를 결론의 근거가 아니라 **예비 관찰**로 표기해야 한다.
+- N\*=1이 나오면 비교할 비배수 배경이 존재하지 않아 2단계 확인이 불가능하다. 이는 오류가 아니라 **기하학적 방법이 주기를 검출하지 못했다는 결과**이므로 그대로 보고한다.
+
+**(3) 보고 항목** — 아래 4가지를 산출해 이 절에 삽입한다. (`internal_validation.py`가 모두 자동 생성한다.)
 
 1. **N별 H 집계표**: N=1..20 각각의 count / mean / median / std (앵커 1~2개가 아니라 **전체 유효 앵커**)
 2. **N별 H Box plot**: 정배수 후보에서 분포 전체가 낮아지는지를 육안 확인
