@@ -1748,7 +1748,7 @@ L532 ========================================================================
 | 판본 | 커밋 해시 | 포함 내용 |
 |---|---|---|
 | v3 | `09c5fb133218a48e4015233f338d7b24c996966a` | `verification_v3.py`, `verification_v3_log.txt`(532행), 이미지 07·08 |
-| v4 | `__V4_COMMIT_HASH__` | `verification_v4.py`, `verification_v4_log.txt`, 이미지 09 |
+| v4 | `2cbaae22986e2d76678db6ed516b8b061c432f87` | `verification_v4.py`, `verification_v4_log.txt`, 이미지 09 |
 
 > 자기 참조의 한계: 논문 파일 자체가 저장소 안에 있으므로, 그 파일에 적힌 해시는 **논문
 > 본문을 담은 커밋이 아니라 그 논문이 인용하는 스크립트·로그를 담은 커밋**을 가리킨다.
@@ -1762,7 +1762,7 @@ cd find_n
 git checkout 09c5fb133218a48e4015233f338d7b24c996966a   # v3 판본
 python verification_v3.py       # Appendix C의 로그를 재생성 (verification_v3_log.txt)
 
-git checkout __V4_COMMIT_HASH__                          # v4 판본
+git checkout 2cbaae22986e2d76678db6ed516b8b061c432f87                          # v4 판본
 python verification_v4.py       # Appendix F의 로그를 재생성 (verification_v4_log.txt)
 ```
 
